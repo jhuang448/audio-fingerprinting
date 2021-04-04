@@ -1,45 +1,30 @@
 import librosa, librosa.display
-import os
+import os, pickle
 import numpy as np
 import matplotlib.pyplot as plt
+import collections
 
 # packages for multiprocessing
 from tqdm import tqdm
-from pebble import ProcessPool, ProcessExpired
-from concurrent.futures import TimeoutError
+import concurrent.futures
 import time
 
 import logging
 
 # multiprocessing
-process_num = 32
+process_num = 16
 timeout = 360
 
 # Audio Fingerprint Class
 class AudioFingerprint:
 
-    def __init__(self, file_path, fingerprint_path, params, save=True):
+    def __init__(self, file_path, params):
         self.file_path = file_path
         self.params = params
 
         self.name = os.path.basename(file_path)
-        if os.path.exists(fingerprint_path) == False:
-            os.mkdir(fingerprint_path)
-        self.fingerprint_path = os.path.join(fingerprint_path, self.name + ".npy")
 
-        if save:
-            # check if fingerprint already saved
-            if os.path.exists(self.fingerprint_path):
-                logging.debug(msg="Loading " + self.fingerprint_path)
-                with open(self.fingerprint_path, 'rb') as f:
-                    self.L = np.load(f, allow_pickle=True).item()
-            else:
-                self.compute_fingerprint(audio_path=file_path, plot=False)
-                logging.debug(msg="Saving " + self.fingerprint_path)
-                with open(self.fingerprint_path, 'wb') as f:
-                    np.save(f, self.L)
-        else:
-            self.compute_fingerprint(audio_path=file_path, plot=False)
+        self.compute_fingerprint(audio_path=file_path, plot=False)
 
     def compute_fingerprint(self, audio_path, plot=False):
         tau = self.params["tau"]
@@ -54,16 +39,17 @@ class AudioFingerprint:
         _, n_time = S.shape
 
         # constellation map
+        # S = 10 * np.log10(1 + S, out=np.zeros_like(S), where=(S != 0))
         C = np.zeros_like(S.T)
-        for i in np.arange(self.params["n_freq"]):
+        for i in np.arange(39, self.params["n_freq"]):
 
-            x_st = np.max([0, i - tau])
-            x_ed = np.min([self.params["n_freq"] - 1, i + tau + 1])
+            x_st = np.max([0, i - kappa])
+            x_ed = np.min([self.params["n_freq"] - 1, i + kappa + 1])
 
             for j in np.arange(n_time):
 
-                y_st = np.max([0, j - kappa])
-                y_ed = np.min([n_time - 1, j + kappa + 1])
+                y_st = np.max([0, j - tau])
+                y_ed = np.min([n_time - 1, j + tau + 1])
 
                 if S[i, j] == np.max(S[x_st:x_ed, y_st:y_ed]):
                     C[j, i] = 1
@@ -89,6 +75,8 @@ class AudioFingerprint:
 
             # find target points
             n_target, k_target = np.argwhere(C[t_st:t_ed, f_st:f_ed] == 1).T
+
+            # print("target zone peaks:", len(n_target))
 
             for j in np.arange(len(k_target)):
                 t_target = n_target[j] + t_st
@@ -155,91 +143,78 @@ class FingerprintDB:
     def __init__(self, database_path, fingerprint_path, params):
         self.HT = HashTable()
         self.database_path = database_path
-        self.fingerprint_path = fingerprint_path
+
+        if os.path.exists(fingerprint_path) == False:
+            os.mkdir(fingerprint_path)
+
+        fingerprint_pkl = os.path.join(fingerprint_path, "{}-{}.pkl".format(params["noise_type"], params["snr"]))
         self.params = params
 
-        self.build()
+        self.FP_Dict = dict()
+
+        if os.path.exists(fingerprint_pkl):
+            with open(fingerprint_pkl, 'rb') as f:
+                self.HT, self.FP_Dict = pickle.load(f)
+        else:
+            self.build()
+            with open(fingerprint_pkl, 'wb') as f:
+                pickle.dump([self.HT, self.FP_Dict], f)
 
     def build(self):
-
-        t = time.time()
 
         # build database
         database_list = os.listdir(self.database_path)
 
-        with tqdm(total=len(database_list)) as pbar:
-            with ProcessPool(max_workers=process_num) as pool:
-                future = pool.map(self.add, database_list, timeout=timeout)
-                iterator = future.result()
-                while True:
-                    try:
-                        FP_ref = next(iterator)
-                        self.HT.add(FP_ref)
-                    except StopIteration:
-                        break
-                    except TimeoutError as error:
-                        logging.debug("function took longer than %d seconds" % error.args[1], iterator)
-                    except Exception as error:
-                        logging.debug("function raised %s" % error)
-                    finally:
-                        pbar.update(1)
+        with concurrent.futures.ProcessPoolExecutor(max_workers=process_num) as pool:
+            results = list(tqdm(pool.map(self.add, database_list), total=len(database_list)))
 
-        t = time.time() - t
-        print("Building time: {} secs".format(t))
+        for res in results:
+            FP_ref = res
+            self.HT.add(FP_ref)
+            self.FP_Dict[FP_ref.name] = FP_ref
 
     def add(self, name_ref):
         # add one audio to database
-        FP_ref = AudioFingerprint(os.path.join(self.database_path, name_ref), self.fingerprint_path, self.params)
+        FP_ref = AudioFingerprint(os.path.join(self.database_path, name_ref), self.params)
         return FP_ref
 
-    def search(self, FP_q, report=True):
+    def search(self, FP_q, report=True, return_first=3):
         t = time.time()
 
         search_list = self.HT.search(FP_q)
+        assert(len(search_list) > 0)
 
         scores = {}
-        offsets = {}
 
         items = list(search_list.items())
-        fp_qs = [FP_q] * len(items)
-        with tqdm(total=len(items)) as pbar:
-            with ProcessPool(max_workers=process_num) as pool:
-                future = pool.map(self.search_ref, items, fp_qs, timeout=timeout)
-                iterator = future.result()
-                while True:
-                    try:
-                        name, best_offset, best_score = next(iterator)
-                        scores[name] = best_score
-                        offsets[name] = best_offset
-                    except StopIteration:
-                        break
-                    except TimeoutError as error:
-                        logging.debug("function took longer than %d seconds" % error.args[1], iterator)
-                    except Exception as error:
-                        logging.debug("function raised %s" % error)
-                    finally:
-                        pbar.update(1)
 
-        best_ref = max(scores, key=scores.get)
+        for item in items:
+            name, keys = item
+            FP_ref = self.FP_Dict[name]
+            best_offset, best_score = self.search_ref(FP_ref, FP_q, keys)
+            scores[name] = (best_score, best_offset)
+
+        ranked = sorted(scores.items(), key=lambda x: x[1][0], reverse=True)
+        best_ref = ranked[0][0]
+        best_score, best_offset = ranked[0][1]
 
         t = time.time() - t
         if report:
-            print("Time elapsed: {} secs".format(t))
             print("Query: " + FP_q.name + " Best hit: " + best_ref + " at offset " + \
-                                   str(FP_q.params["n_hop"] / FP_q.params["sr"] * offsets[best_ref]) + " secs.")
+                                   str(FP_q.params["n_hop"] / FP_q.params["sr"] * best_offset) + " secs.\t" + str(ranked[:3]))
 
         hit = 0
         if best_ref == q2ref(FP_q.name):
             hit = 1
 
-        return best_ref, t, hit
+        return_first = np.min([return_first, len(ranked)])
 
-    def search_ref(self, item, FP_q):
-        name, keys = item
-        FP_ref = AudioFingerprint(os.path.join(self.database_path, name), self.fingerprint_path, self.params)
+        return best_ref, hit, ranked[:return_first]
+
+    def search_ref(self, FP_ref, FP_q, keys):
         best_offset, best_score = FP_ref.search(FP_q, keys)
 
-        return name, best_offset, best_score
+        return best_offset, best_score
 
 
 def q2ref(query_file):
