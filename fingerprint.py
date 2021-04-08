@@ -2,7 +2,7 @@ import librosa, librosa.display
 import os, pickle
 import numpy as np
 import matplotlib.pyplot as plt
-import collections
+from scipy import ndimage
 
 # packages for multiprocessing
 from tqdm import tqdm
@@ -18,13 +18,13 @@ timeout = 360
 # Audio Fingerprint Class
 class AudioFingerprint:
 
-    def __init__(self, file_path, params):
+    def __init__(self, file_path, params, plot=False):
         self.file_path = file_path
         self.params = params
 
         self.name = os.path.basename(file_path)
 
-        self.compute_fingerprint(audio_path=file_path, plot=False)
+        self.compute_fingerprint(audio_path=file_path, plot=plot)
 
     def compute_fingerprint(self, audio_path, plot=False):
         tau = self.params["tau"]
@@ -36,30 +36,39 @@ class AudioFingerprint:
         y, _ = librosa.load(audio_path, sr=self.params["sr"])
         S = np.abs(librosa.stft(y, n_fft=self.params["n_fft"], hop_length=self.params["n_hop"]))  # n_freq, time
         S = S[:self.params["n_freq"], :]
-        _, n_time = S.shape
+        n_freq, n_time = S.shape
+
+        windows = self.get_window_size(S)
 
         # constellation map
-        # S = 10 * np.log10(1 + S, out=np.zeros_like(S), where=(S != 0))
         C = np.zeros_like(S.T)
-        for i in np.arange(39, self.params["n_freq"]):
-
-            x_st = np.max([0, i - kappa])
-            x_ed = np.min([self.params["n_freq"] - 1, i + kappa + 1])
+        for i in np.arange(0, self.params["n_freq"]):
 
             for j in np.arange(n_time):
 
+                kappa = windows[1][j]
+                tau = windows[0][j]
+
+                x_st = np.max([0, i - kappa])
+                x_ed = np.min([n_freq, i + kappa + 1])
+
                 y_st = np.max([0, j - tau])
-                y_ed = np.min([n_time - 1, j + tau + 1])
+                y_ed = np.min([n_time, j + tau + 1])
 
                 if S[i, j] == np.max(S[x_st:x_ed, y_st:y_ed]):
                     C[j, i] = 1
         n, k = np.argwhere(C == 1).T
 
         if plot:
-            fig = plt.figure(figsize=(15, 5))
+            fig = plt.figure(figsize=(15, 8))
             ax = fig.add_subplot(111)
             im = ax.imshow(np.log(1 + 1 * S), origin='lower', aspect='auto', cmap='gray_r')
-            ax.scatter(n, k, color='r', s=10, marker='o')
+            ax.scatter(n, k, color='r', s=15, marker='o')
+
+            _ = plt.xticks(np.arange(0, n_time, self.params["sr"] / self.params["n_hop"]), np.arange(0, len(y) // self.params["sr"]))
+            _ = plt.yticks(np.arange(0, n_freq, 500 / self.params["sr"] * self.params["n_fft"]), np.arange(0, self.params["sr"] // 2, 500))
+            _ = plt.xlabel("time (s)", fontsize=18)
+            _ = plt.ylabel("frequency (Hz)",fontsize=18)
 
         # pair-wise indexing
         self.L = dict()
@@ -114,6 +123,14 @@ class AudioFingerprint:
         best_offset = max(M, key=M.get)
         return best_offset, M[best_offset]
 
+    def get_window_size(self, S, context=5, window_base=np.array([[3],[20]])):
+        n_freq, n_time = S.shape
+        e = np.log(1+np.sqrt(np.sum(S ** 2, axis=0)))
+        e = ndimage.convolve(e, weights=np.ones(context)/context)
+        windows = np.matmul(window_base, np.ones((1, len(e))))
+        windows[:, e >= 3.5] += np.array([[2], [10]])
+        return windows.astype(int)
+
 
 class HashTable:
     def __init__(self):
@@ -147,7 +164,7 @@ class FingerprintDB:
         if os.path.exists(fingerprint_path) == False:
             os.mkdir(fingerprint_path)
 
-        fingerprint_pkl = os.path.join(fingerprint_path, "{}-{}.pkl".format(params["noise_type"], params["snr"]))
+        fingerprint_pkl = os.path.join(fingerprint_path, "database.pkl")
         self.params = params
 
         self.FP_Dict = dict()
@@ -201,15 +218,23 @@ class FingerprintDB:
         t = time.time() - t
         if report:
             print("Query: " + FP_q.name + " Best hit: " + best_ref + " at offset " + \
-                                   str(FP_q.params["n_hop"] / FP_q.params["sr"] * best_offset) + " secs.\t" + str(ranked[:3]))
+                                   str(FP_q.params["n_hop"] / FP_q.params["sr"] * best_offset) + " secs.")
 
-        hit = 0
-        if best_ref == q2ref(FP_q.name):
-            hit = 1
+        # find the rank of the reference
+        ranked_clean = []
+        for i in np.arange(len(ranked)):
+            if ranked[i][0] not in ranked_clean:
+                ranked_clean.append(ranked[i][0])
+
+        hit = np.Inf
+        for i in np.arange(len(ranked_clean)):
+            if ranked_clean[i] == q2ref(FP_q.name):
+                hit = i
+                break
 
         return_first = np.min([return_first, len(ranked)])
 
-        return best_ref, hit, ranked[:return_first]
+        return best_ref, hit, ranked_clean[:return_first]
 
     def search_ref(self, FP_ref, FP_q, keys):
         best_offset, best_score = FP_ref.search(FP_q, keys)
