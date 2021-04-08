@@ -1,4 +1,5 @@
 import os, logging, time
+import argparse
 from fingerprint import FingerprintDB, AudioFingerprint
 logging.basicConfig(level=logging.WARNING)
 
@@ -86,6 +87,19 @@ def audioIdentification(query_path, fingerprint_path, output_file, params=params
     return acc_top1, acc_top3, avg_prec, avg_t
 
 if __name__ == "__main__":
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--database_path', type=str, default=database_path)
+    parser.add_argument('--fingerprint_path', type=str, default=fingerprint_path)
+    parser.add_argument('--query_path', type=str, default=query_path)
+    parser.add_argument('--output_file', type=str, default=output_file)
+    args = parser.parse_args()
+    print(args)
+
+    database_path = args.database_path
+    fingerprint_path = args.fingerprint_path
+    query_path = args.query_path
+    output_file = args.output_file
 
     fingerprintBuilder(database_path, fingerprint_path, params)
     audioIdentification(query_path, fingerprint_path, output_file, params)
