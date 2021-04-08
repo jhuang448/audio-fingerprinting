@@ -4,8 +4,8 @@ from fingerprint import FingerprintDB, AudioFingerprint
 logging.basicConfig(level=logging.WARNING)
 
 # paths
-# database_path = "../fp_data_dummy/db/" # "../fp_data/database_recordings/"
-# query_path = "../fp_data_dummy/query/" # "../fp_data/query_recordings/"
+# database_path = "../fp_data_dummy/db/"
+# query_path = "../fp_data_dummy/query/"
 # fingerprint_path = "./fingerprints_dummy/"
 # output_file = "./output/output_dummy.txt"
 

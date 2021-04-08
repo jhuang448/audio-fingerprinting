@@ -131,7 +131,7 @@ class AudioFingerprint:
         windows[:, e >= 3.5] += np.array([[2], [10]])
         return windows.astype(int)
 
-
+# Hash Table Class
 class HashTable:
     def __init__(self):
         self.table = dict()
@@ -155,7 +155,7 @@ class HashTable:
     def print(self):
         logging.debug(msg=self.table)
 
-
+# Fingerprint Database Class
 class FingerprintDB:
     def __init__(self, database_path, fingerprint_path, params):
         self.HT = HashTable()
