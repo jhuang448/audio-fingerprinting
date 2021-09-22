@@ -1,4 +1,4 @@
-# Beat and Downbeat Tracking
+# Audio Fingerprinting
 ECS7006 Music Informatics 2021, Coursework 2
 
 A Shazam-style audio fingerprinting system.
